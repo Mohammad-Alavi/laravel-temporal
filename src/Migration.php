@@ -1,8 +1,8 @@
 <?php namespace Gazugafan\Temporal;
 
-use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\DB;
 use Gazugafan\Temporal\Exceptions\TemporalException;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class Migration
 {
@@ -24,69 +24,109 @@ class Migration
 		if (count($primary_keys) == 0)
 			throw new TemporalException('The table doesn\'t seem to have any primary keys. A temporal model table needs at least one primary key. Try adding an "id" column first using $table->increments(\'id\').');
 
-		//remove the primary key(s) and auto-increment in one statement...
-		$alter_commands = array();
-		$alter_commands[] = "DROP PRIMARY KEY";
-		foreach($primary_keys as $primary_key=>$info)
-		{
-			if ($info['auto_increment'])
-				$alter_commands[] = "MODIFY `$primary_key` {$info['type']} NOT NULL";
-		}
-		DB::statement("ALTER TABLE `$tablename` " . implode(', ', $alter_commands) . ';');
+		// Operations for mysql driver
+		if (self::isMySql()) {
+			//remove the primary key(s) and auto-increment in one statement...
+			$alter_commands = array();
+			$alter_commands[] = "DROP PRIMARY KEY";
+			foreach ($primary_keys as $primary_key => $info) {
+				if ($info['auto_increment'])
+					// "MODIFY `id` int(10) unsigned NOT NULL"
+					$alter_commands[] = "MODIFY `$primary_key` {$info['type']} NOT NULL";
+			}
+			// "ALTER TABLE `table_name` DROP PRIMARY KEY, MODIFY `id` int(10) unsigned NOT NULL;"
+			DB::statement("ALTER TABLE `$tablename` " . implode(', ', $alter_commands) . ';');
 
-		//add the temporal columns and specify new primary keys...
-		Schema::table($tablename, function ($table) use($primary_keys, $version, $temporal_start, $temporal_end, $temporal_max) {
-			$keys = array_keys($primary_keys);
-			$table->unsignedMediumInteger($version)->comment('The version number')->default(0)->after(end($keys));
-			$table->dateTime($temporal_start)->comment('When the revision begins')->default(DB::raw('NOW()'))->after($version);
-			$table->dateTime($temporal_end)->comment('When the revision ends')->default($temporal_max)->after($temporal_start);
-			$table->primary(array_merge($keys, array($version)));
-			$table->index(array_merge(array($temporal_end), $keys), 'current_version');
-			$table->index(array_merge($keys, array($temporal_start, $temporal_end)), 'version_at_time');
-		});
+			//add the temporal columns and specify new primary keys...
+			Schema::table($tablename, function ($table) use ($primary_keys, $version, $temporal_start, $temporal_end, $temporal_max) {
+				$keys = array_keys($primary_keys);
+				$table->unsignedMediumInteger($version)->comment('The version number')->default(0)->after(end($keys));
+				$table->dateTime($temporal_start)->comment('When the revision begins')->default(now())->after($version);
+				$table->dateTime($temporal_end)->comment('When the revision ends')->default($temporal_max)->after($temporal_start);
+				$table->primary(array_merge($keys, array($version)));
+				$table->index(array_merge(array($temporal_end), $keys), 'current_version');
+				$table->index(array_merge($keys, array($temporal_start, $temporal_end)), 'version_at_time');
+			});
 
-		//add auto-increments back...
-		$alter_commands = array();
-		foreach($primary_keys as $primary_key=>$info)
-		{
-			if ($info['auto_increment'])
-				$alter_commands[] = "MODIFY `$primary_key` {$info['type']} NOT NULL AUTO_INCREMENT";
+			//add auto-increments back...
+			$alter_commands = array();
+			foreach ($primary_keys as $primary_key => $info) {
+				if ($info['auto_increment'])
+					// "MODIFY `id` int(10) unsigned NOT NULL AUTO_INCREMENT"
+					$alter_commands[] = "MODIFY `$primary_key` {$info['type']} NOT NULL AUTO_INCREMENT";
+			}
+			// "ALTER TABLE `table_name` MODIFY `id` int(10) unsigned NOT NULL AUTO_INCREMENT;"
+			DB::statement("ALTER TABLE `$tablename` " . implode(', ', $alter_commands) . ';');
 		}
-		DB::statement("ALTER TABLE `$tablename` " . implode(', ', $alter_commands) . ';');
+
+		// Operations for sqlite driver
+		if (self::isSQLite()) {
+			Schema::table($tablename, function ($table) use ($primary_keys, $version, $temporal_start, $temporal_end, $temporal_max) {
+				$keys = array_keys($primary_keys);
+				$table->dateTime($temporal_start)->comment('When the revision begins')->default(now())->after($version);
+				$table->dateTime($temporal_end)->comment('When the revision ends')->default($temporal_max)->after($temporal_start);
+				$table->index(array_merge(array($temporal_end), $keys), 'current_version');
+				$table->index(array_merge($keys, array($temporal_start, $temporal_end)), 'version_at_time');
+			});
+		}
 	}
 
 	/**
 	 * Figures out which columns in the specified table are primary keys, and returns information about them.
 	 *
 	 * @param string $tablename The table to retrieve the primary keys from
-	 * @throws TemporalException If the primary key(s) cannot be retrieved (possibly due to a non-MySQL database driver)
 	 * @return array An associative array of the table's primary keys, with the key being the name of the column, and the value being an array of information about the column.
+	 * @throws TemporalException If the primary key(s) cannot be retrieved (possibly due to a non-MySQL database driver)
 	 */
 	private static function get_primary_keys($tablename)
 	{
-		//determine if we have an auto-incrementing field...
 		$primary_keys = array();
-		$columns = DB::select("SHOW COLUMNS FROM `$tablename`;");
-		if (count($columns))
-		{
-			foreach($columns as $column=>$info)
-			{
-				$data = array();
-				foreach($info as $key=>$val)
-					$data[strtolower($key)] = $val;
+		if (self::isMySql()) {
+			$columns = DB::select("SHOW COLUMNS FROM `$tablename`;");
+		}
+		if (self::isSQLite()) {
+			$columns = DB::select("PRAGMA table_info($tablename)");
+		}
 
-				if (strpos(strtolower($data['key']), 'pri') !== false)
-				{
-					$primary_keys[$data['field']] = array(
-						'type'=>$data['type'],
-						'auto_increment'=>(strpos(strtolower($data['extra']), 'auto_increment') !== false)
-					);
+		//determine if we have an auto-incrementing field...
+		if (count($columns)) {
+			foreach ($columns as $column => $info) {
+				$data = array();
+				// make keys all lowercase
+				foreach ($info as $key => $val) {
+					$data[strtolower($key)] = $val;
+				}
+				// run if diver is mysql
+				if (self::isMySql()) {
+					if (strpos(strtolower($data['key']), 'pri') !== false) {
+						$primary_keys[$data['field']] = array(
+							'type' => $data['type'],
+							'auto_increment' => (strpos(strtolower($data['extra']), 'auto_increment') !== false)
+						);
+					}
+				}
+				// run if diver is sqlite
+				if (isSQLiteDriver()) {
+					if ($data['pk']) {
+						$primary_keys[$data['name']] = array(
+							'type' => $data['type'],
+						);
+					}
 				}
 			}
 
 			return $primary_keys;
-		}
-		else
-			throw new TemporalException('Could not get info about the table to base modifications on. Maybe this isn\'t a MySQL database?');
+		} else
+			throw new TemporalException('Could not get info about the table to base modifications on. Maybe this isn\'t a MySQL or SQLite database?');
+	}
+
+	private static function isMySql(): bool
+	{
+		return strtolower(DB::connection()->getDriverName()) === 'mysql';
+	}
+
+	private static function isSQLite(): bool
+	{
+		return strtolower(DB::connection()->getDriverName()) === 'sqlite';
 	}
 }
